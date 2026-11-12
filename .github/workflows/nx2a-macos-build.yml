@@ -1,0 +1,25 @@
+# Fork-only: builds the macOS bundle from a manually chosen ref and keeps it as the run's artifact.
+name: macOS build (fork)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the tags: git describe names the bundle
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements.txt pyinstaller
+      - run: python packaging/build_bundle.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nx2android-macos
+          path: dist/nx2android-*-macos-*.zip
