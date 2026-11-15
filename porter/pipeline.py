@@ -244,9 +244,45 @@ class Port:
         return self.result
 
     # ---- inputs: the folder's games and versions, the profile, the version to pack ----
+    def _seeded_extract(self):
+        """A previous port's complete extraction (extract/<ver>/ExeFS/main + a RomFS folder) in this
+        folder's build dirs: the dump itself may be missing or damaged. Returns (version, dir) or None."""
+        for main in sorted(self.o.folder.glob('*_build/extract/*/ExeFS/main')):
+            exdir = main.parent.parent
+            if (exdir / 'RomFS').is_dir() and any((exdir / 'RomFS').iterdir()):
+                tid_hex = main.parents[3].name.split('_')[0]   # <title ID>_build/extract/<ver>/ExeFS/main
+                return tid_hex, exdir
+        return None
+
     def inputs(self):
         o = self.o
         say(f'game folder: {o.folder}')
+        seeded = self._seeded_extract()
+        if seeded:
+            tid_hex, sdir = seeded
+            say(f'[RED] no dump needed: building from the seeded extraction {sdir} (the dump itself is not on this machine)')
+            self.app = int(tid_hex, 16)
+            tid = f'{self.app:016X}'
+            self.work = o.folder / f'{tid_hex}_build'
+            g, ap = profiles.by_title(self.app)
+            if not (g and ap): raise BuildError(f'no game profile for {tid} (seeded extract)')
+            self.g, self.ap = g, ap
+            self.package = o.package or ap.package
+            if not re.fullmatch(r'[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+', self.package): raise BuildError(f'not a package name: {self.package}')
+            marker = g.get('romfs_marker', '')
+            if marker and not (sdir / 'RomFS' / marker).exists(): raise BuildError(f'the seeded RomFS lacks the profile marker file {marker}')
+            self.pkg_ver = 'v0'
+            self.provisional = False
+            self.derived = 'packing v0 from the seeded extraction (the dump is not on this machine)'
+            self.derived_mem, self.lost = '', []
+            say(f'game profile: {g.id} {g.get("name", "")} (Android: {ap.status}) — {self.derived}')
+            self.versions, self.have = ['v0'], {'v0': None}
+            self.fam = {'base': sdir, 'updates': [], 'dlc': []}
+            self.check_space()
+            self.aw = self.work / 'android'; self.logs = self.work / 'logs'
+            for d in (self.aw, self.logs, self.work / 'tmp'): d.mkdir(parents=True, exist_ok=True)
+            self.env.update(DM_GAME=g.id, DM_ROOT=str(self.work), WORK=str(self.work / 'tmp'))
+            return
         self.app, self.fam = nsp.scan_nsps(o.folder, dumps.EXTS, o.keys)
         tid = f'{self.app:016X}'
         self.work = o.folder / f'{tid}_build'
@@ -451,7 +487,7 @@ class Port:
         # Unreal paks (version 11) and IoStore containers: their shader code archives are decoded with the game's own Oodle on the device too (device_ue)
         self.ue_why = src['ue_decode'][1] if src['ue_decode'][0] else ''
         why = self.oodle_why or self.ue_why
-        if why:
+        if why and os.environ.get('DM_LOCAL_OODLE') != '1':
             if not self.tools.get('adb'):   # adb is optional for a port that does not install (toolchain.require): this one needs it
                 raise BuildError(f"{self.app_name}'s shaders are in Oodle-compressed archives ({why}): the port decodes them with the game's own decoder on the Android "
                                  f'device, so it needs adb and the device even without installing. {NO_ADB}; then connect the device (USB debugging on) and port again')
@@ -529,9 +565,21 @@ class Port:
         say(f"shaders in Oodle-compressed archives ({self.oodle_why}): {len(recs):,} entries decoded by the game's own decoder on the device, "
             f"{sum(len(e) for _, e in by.values()):,} of them hold shaders")
         return {'DM_GFPAK_DECODED': str(dec)}
+
+    def _local_oodle_job(self, job, out, bnsh=False):
+        """The device decode, run locally without a device: the job's Oodle streams decompressed
+        with ooz (powzix/ooz's Kraken decoder, built as dmoj), answering the same DMOR protocol."""
+        import subprocess
+        dmoj = os.environ.get('DM_OOZ_BIN') or '/home/codespace/oozextract/target/release/dmoj'
+        if not os.path.exists(dmoj): raise BuildError('the ooz decoder (dmoj) is not built')
+        r = subprocess.run([dmoj, str(job.resolve()), str(out.resolve())], timeout=1800)
+        if r.returncode != 0: raise BuildError(f'the Oodle decode (ooz) failed (exit {r.returncode})')
+
     def device_oodle_job(self, job, out, bnsh=False):
         """One Oodle job file (hle_oodle.c: "DMOJ" records) decoded on the device into out ("DMOR"); the job file is removed. The host as an executable and the rewritten modules
         go to the device once a port (device_oodle_end removes them). bnsh: only the entries that hold a BNSH shader come back (DM_OODLE_JOB_BNSH)"""
+        if os.environ.get('DM_LOCAL_OODLE') == '1':   # no device: run the same host statically under qemu-aarch64 (an x86 build machine standing in for the device)
+            return self._local_oodle_job(job, out, bnsh)
         adb = getattr(self, 'oodle_adb', None)
         if not adb:
             adb = Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say); adb.pick()

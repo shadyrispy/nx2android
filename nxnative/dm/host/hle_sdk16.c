@@ -257,9 +257,69 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → h
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
+// DM_ABORT_DUMP: debug only. Reads the fatal message UE5 builds at the abort (x2 of the report call, an FString at a main-relative address in DM_ABORT_MSG) and the guest stack words
+static void dump_fstring(module_t *m, uint64_t addr, const char *what) {
+    uint64_t *obj = (uint64_t *)(uintptr_t)addr;
+    uint64_t ptr = obj[0]; uint32_t num = (uint32_t)(obj[1] & 0xffffffffu);
+    LOG("[dump] %s at %#llx: data %#llx num %u", what, (unsigned long long)addr, (unsigned long long)ptr, num);
+    if (!ptr || !num || num > 8192) return;
+    const uint16_t *w = (const uint16_t *)(uintptr_t)ptr; char out[16384]; size_t o = 0;
+    for (uint32_t i = 0; i < num && o + 4 < sizeof out; i++) { uint32_t c = w[i];
+        if (c < 0x80) out[o++] = (char)c;
+        else if (c < 0x800) { out[o++] = (char)(0xC0 | (c >> 6)); out[o++] = (char)(0x80 | (c & 0x3F)); }
+        else { out[o++] = (char)(0xE0 | (c >> 12)); out[o++] = (char)(0x80 | ((c >> 6) & 0x3F)); out[o++] = (char)(0x80 | (c & 0x3F)); } }
+    out[o] = 0; LOG("[dump] %s text: %s", what, out);
+}
+// A call to the fatal reporter (main+0x1f89c0: x1 = format, x2 = the FString's address) is the interesting one: report its x2 object
+static void dump_call_args(void) {
+    const char *off = getenv("DM_ABORT_MSG");
+    if (!off || !*off) return;
+    uint64_t o = strtoull(off, NULL, 0); if (!o) return;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { dump_fstring(&g_mod[i], (uint64_t)(uintptr_t)(g_mod[i].base + o), "fatal message"); return; }
+}
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
     LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
+    dump_call_args();
+    // DM_ABORT_SCAN=<bytes>: debug only. Walk the aborting thread's guest stack and print every FString-looking pair
+    // ({TCHAR* Data; int32 Num; int32 Max}) whose text is mostly printable: UE5 builds its fatal message there.
+    const char *scan = getenv("DM_ABORT_SCAN");
+    if (scan && *scan) {
+        uint64_t n = strtoull(scan, NULL, 0); if (n > (1u << 20)) n = 1u << 20;
+        uint8_t *sp = (uint8_t *)__builtin_frame_address(0);
+        for (uint64_t off = 0; off + 16 <= n; off += 8) {
+            uint64_t *pair = (uint64_t *)(sp + off);
+            uint64_t data = pair[0]; uint32_t num = (uint32_t)(pair[1] & 0xffffffffu);
+            if (!data || num < 4 || num > 4096 || (data & 1)) continue;
+            const uint16_t *w = (const uint16_t *)(uintptr_t)data;
+            uint32_t good = 0; for (uint32_t i = 0; i < num && i < 64; i++) { uint32_t c = w[i]; if (c == 0) break; if (c >= 0x20 && c < 0x7f) good++; }
+            if (good < 8) continue;
+            char out[16384]; size_t o = 0;
+            for (uint32_t i = 0; i < num && o + 4 < sizeof out; i++) { uint32_t c = w[i]; if (!c) break;
+                if (c < 0x80) out[o++] = (char)c;
+                else if (c < 0x800) { out[o++] = (char)(0xC0 | (c >> 6)); out[o++] = (char)(0x80 | (c & 0x3F)); }
+                else { out[o++] = (char)(0xE0 | (c >> 12)); out[o++] = (char)(0x80 | ((c >> 6) & 0x3F)); out[o++] = (char)(0x80 | (c & 0x3F)); } }
+            out[o] = 0; LOG("[scan] sp+%#llx num %u: %s", (unsigned long long)off, num, out);
+        }
+    }
+    const char *dump = getenv("DM_ABORT_DUMP");   // debug: comma-separated module-relative offsets holding FString objects ({TCHAR *Data; int32 Num; int32 Max}), printed before the backtrace
+    if (dump && *dump && m) {
+        char buf[256]; snprintf(buf, sizeof buf, "%s", dump);
+        for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+            uint64_t off = strtoull(tok, NULL, 0); if (!off) continue;
+            uint64_t *obj = (uint64_t *)(m->base + off);
+            uint64_t ptr = obj[0]; uint32_t num = (uint32_t)(obj[1] & 0xffffffffu);
+            LOG("[dump] main+%#llx: data %#llx num %u", (unsigned long long)off, (unsigned long long)ptr, num);
+            if (ptr && num && num < 4096) {
+                const uint16_t *w = (const uint16_t *)(uintptr_t)ptr; char out[4096]; size_t o = 0;
+                for (uint32_t i = 0; i < num && o + 4 < sizeof out; i++) { uint32_t c = w[i];
+                    if (c < 0x80) out[o++] = (char)c;
+                    else if (c < 0x800) { out[o++] = (char)(0xC0 | (c >> 6)); out[o++] = (char)(0x80 | (c & 0x3F)); }
+                    else { out[o++] = (char)(0xE0 | (c >> 12)); out[o++] = (char)(0x80 | ((c >> 6) & 0x3F)); out[o++] = (char)(0x80 | (c & 0x3F)); } }
+                out[o] = 0; LOG("[dump] utf16: %s", out);
+            }
+        }
+    }
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("game aborted");
 }

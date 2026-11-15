@@ -113,7 +113,10 @@ if a.only_compile: sys.exit(1 if failed else 0)
 LIBS = ['-landroid', '-llog', '-lvulkan', '-laaudio', '-lnativewindow', '-lmediandk', '-lz', '-lm', '-ldl']   # -lz: the gamepad theme's PNGs (overlay_theme.c)
 LDFLAGS = [TARGET, '-fuse-ld=lld', '-Wl,--error-limit=0', '-Wl,-z,max-page-size=16384', '-Wl,--build-id', '-Wl,-z,nostart-stop-gc']
 if a.exe:
-    r = subprocess.run([CC] + LDFLAGS + ['-pie', '-o', str(out / 'dmhost')] + [str(o) for o in objs + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
+    if os.environ.get('DM_STATIC_EXE') == '1':   # local decode under qemu-user: a static bionic executable, no device linker needed
+        r = subprocess.run([CC] + LDFLAGS + ['-static', '-Wl,--unresolved-symbols=ignore-all', '-o', str(out / 'dmhost')] + [str(o) for o in objs + vobjs] + ['-lz'], capture_output=True, text=True, errors='replace')
+    else:
+        r = subprocess.run([CC] + LDFLAGS + ['-pie', '-o', str(out / 'dmhost')] + [str(o) for o in objs + vobjs] + LIBS, capture_output=True, text=True, errors='replace')
     print(r.stderr.strip() if r.returncode else f'linked {out / "dmhost"}', file=sys.stderr if r.returncode else sys.stdout)
     if r.returncode: sys.exit(1)
 if a.lib:

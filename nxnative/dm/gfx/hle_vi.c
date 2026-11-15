@@ -54,9 +54,28 @@ uint64_t dm_nvn_frame_count(void);
 HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest frame number: the frames presented so far", Result, h_vi_FrameNo, uint64_t *out, const void *layer) {
     (void)layer; *out = dm_nvn_frame_count(); return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: none kept, 0 entries", int, h_vi_FrameHist, void *out, int n, const void *layer) {
-    (void)out; (void)layer; static int once; if (!once++) LOG("vi::ListFrameHistory (%d entries asked): the host keeps no frame history, 0 returned", n);
-    return 0;
+// The last 8 presents, newest first. Unreal Engine 5's frame fence waits for the newest presented frame to leave the present queue, and a history of 0 entries
+// made that wait never end: on iOS the note is "the boot stopped for good after the intro" (Minecraft Dungeons II, seedds/nxnative#844). Android's present is
+// synchronous, so a recorded frame is already shown: status 2 (shown) with the queued and shown ticks equal.
+#define VFH 8
+typedef struct { uint64_t frame, ticks; } vfh_ent;
+static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t vfh_ticks(uint64_t ns) { return ns * 12 / 625; }   // Switch ticks at 19.2 MHz, as guest_ticks (hle_os.c)
+void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues
+    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, vfh_ticks(guest_ns())}; pthread_mutex_unlock(&g_vfh_mu);
+}
+HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown", int, h_vi_FrameHist, void *out, int n, const void *layer) {
+    (void)layer; if (!out || n <= 0) return VFH;
+    uint64_t latest = dm_nvn_frame_count(); int k = 0;
+    pthread_mutex_lock(&g_vfh_mu);
+    for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
+        vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
+        uint64_t *o = (uint64_t *)out + 5 * k++;
+        o[0] = 2; o[1] = f; o[2] = e->ticks; o[3] = o[4] = e->ticks;
+    }
+    pthread_mutex_unlock(&g_vfh_mu);
+    static int once; if (k && !once++) LOG("vi::ListFrameHistory: %d of the last %d presents returned (up to frame %llu)", k, VFH, (unsigned long long)latest);
+    return k;
 }
 // Rhythm Heaven Groove (SDK 21) asks for the built-in panel's identity at start (main+0xa9a4); the SDK's version calls through the vi service object the host never made (SIGSEGV at +0x20).
 //   The game reads a u32 kind and, when it is 2 or more, 0x14 more bytes that it hands on; any other answer makes it hand on zeros. The host has no panel: an all-zero identifier, kind 0

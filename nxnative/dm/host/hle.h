@@ -57,3 +57,9 @@ extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_s
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+
+// Library applets (upstream's hle_oe.c tracks their focus): the fork's host has no applet focus machinery, so an applet is only named in the log
+void dm_applet_enter(const char *name);
+static inline void dm_applet_leave(void) { }
+static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
+#define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)

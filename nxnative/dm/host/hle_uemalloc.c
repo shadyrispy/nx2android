@@ -35,6 +35,8 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "DRAGON QUEST VII Reimagined 1.2.0", UE4_27, 0, 0x5e4c0e8, 0x32758dc },
     // FINAL FANTASY RESONANCE 1.0.1: the FMallocBinned3 object (main+0x77c6210, bss), its vtable (main+0x67df800, 32 slots), the cut constructor call (main+0x137f0)
     { "84e182f72ee1da4f477804bd05b54c15", "FINAL FANTASY RESONANCE 1.0.1", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
+    // Minecraft Dungeons II 1.1.1 (v65536): the FMallocBinned3 object (main+0x9979228, bss), its vtable (main+0x85b68a8, 26 slots), the cut constructor call (main+0x143b0, a nop after the rewrite)
+    { "9e9d887d59f7f7db176b35e3379258b9", "Minecraft Dungeons II 1.1.1", UE5_6, 0x9979228, 0x85b68a8, 0x143b0 },
 };
 enum { NSLOT = 32 };
 

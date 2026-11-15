@@ -182,18 +182,26 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 }
 
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
-static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
+static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits; static unsigned char *g_force_skip;
 static void force_init(void) {
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
-    for (unsigned i = 0; i < g_nforce; i++)
+    // A name taken over twice (the fork's own ldn/socket modules and an offline entry, say): the first entry answers, later ones are skipped. This used to die, which
+    // made any profile whose offline module overlaps the fork's own modules unlaunchable.
+    g_force_skip = calloc(g_nforce + 1, sizeof *g_force_skip);
+    for (unsigned i = 0; i < g_nforce; i++) {
+        if (g_force_skip[i]) continue;
         for (unsigned j = i + 1; j < g_nforce; j++)
-            if (!strcmp(g_force[i].name, g_force[j].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
+            if (!g_force_skip[j] && !strcmp(g_force[i].name, g_force[j].name)) {
+                LOG("[mem] takeover %s listed twice: the first entry answers (a profile's offline module overlapping the fork's own)", g_force[i].name);
+                g_force_skip[j] = 1;
+            }
+    }
 }
 static void *force_lookup(const char *name) {
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!strcmp(g_force[i].name, name)) {
+        if (!g_force_skip[i] && !strcmp(g_force[i].name, name)) {
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  (%s)", name, g_force[i].why);
             void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
