@@ -26,16 +26,33 @@ struct mavc {
     // packet of its 1024x576 movies with time 0, and c2.qti.avc.decoder gave no picture for 81 packets and then took no more input. With made-up timestamps the codec's
     // own output order stands (synth: the queue is not sorted)
     int64_t last_in; int synth; struct { int64_t c, g; } pmap[64]; int npmap;
+    // What the live codec was configured with: the next movie with the same SPS / PPS (and RGBA mode) reuses it with a flush instead of paying the 1-3 s open
+    uint8_t csps[512], cpps[512]; int cnsps, cnpps, cfg_rgba, cfg_ok;
 };
 
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = INT64_MIN; return a; }
-static void close_codec(mavc *a) { if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }
+// Opening a hardware decoder costs 1-3 s (create + configure + start), paid on the first frame of every movie: Minecraft Dungeons II stalls its game thread for
+// 3.5 s when a cutscene starts. The decoder is kept when a movie ends (DM_MOVIE_WARM=0 turns that off) and the next movie reuses it while the stream's SPS / PPS match.
+static mavc *g_warm;   // the decoder kept for the next movie
+mavc *mavc_new(void) {
+    if (g_warm) { mavc *a = g_warm; g_warm = NULL; a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; return a; }
+    mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->last_in = INT64_MIN; return a;
+}
+static void close_codec(mavc *a) { a->cfg_ok = 0; if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; } a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }
 void mavc_drop(mavc *a) {
     for (int i = 0; i < a->nq; i++) free(a->q[i].nv12);
     a->nq = 0;
     if (a->mc) { AMediaCodec_flush(a->mc); a->nin = a->nout = 0; a->eos_sent = 0; a->last_in = INT64_MIN; a->npmap = 0; }   // a seek: pictures in the codec belong to the old position
 }
-void mavc_free(mavc *a) { if (!a) return; mavc_drop(a); close_codec(a); free(a->au); free(a); }
+void mavc_free(mavc *a) {
+    if (!a) return;
+    mavc_drop(a);
+    const char *w = getenv("DM_MOVIE_WARM");
+    if (a->mc && !(w && *w && atoi(w) == 0)) {   // keep it: the next movie may reuse it
+        if (g_warm) { close_codec(g_warm); free(g_warm->au); free(g_warm); }
+        g_warm = a; return;
+    }
+    close_codec(a); free(a->au); free(a);
+}
 int mavc_queued(const mavc *a) { return a->nq; }
 int mavc_held(const mavc *a) { return a->nq + (a->mc && !a->eos_sent && a->nin > a->nout ? (int)(a->nin - a->nout) : 0); }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
@@ -78,6 +95,12 @@ static void set_csd(AMediaFormat *f, const char *key, const uint8_t *nal, int n)
     uint8_t b[4 + 512] = {0, 0, 0, 1}; memcpy(b + 4, nal, (size_t)n); AMediaFormat_setBuffer(f, key, b, (size_t)n + 4);
 }
 static int open_codec(mavc *a) {
+    if (a->mc && a->cfg_ok && a->cfg_rgba == a->rgba && a->cnsps == a->nsps && a->cnpps == a->npps
+        && !memcmp(a->csps, a->sps, a->nsps) && !memcmp(a->cpps, a->pps, a->npps)) {
+        mavc_drop(a);   // the last movie ended on its EOS: flush, keep the decoder
+        LOG("[movie] AVC: reusing the decoder kept from the last movie (same SPS / PPS)");
+        return 1;
+    }
     close_codec(a);
     if (!a->nsps || !a->npps) { if (!a->red++) LOG("[RED] movie: AVC has no SPS / PPS, outputting black frames"); return 0; }
     a->mc = AMediaCodec_createDecoderByType("video/avc");
@@ -94,6 +117,8 @@ static int open_codec(mavc *a) {
     char *name = NULL; AMediaCodec_getName(a->mc, &name);
     LOG("[movie] AVC: MediaCodec decoder %s, profile %d", name ? name : "?", a->nsps > 1 ? a->sps[1] : 0);
     if (name) AMediaCodec_releaseName(a->mc, name);
+    a->cnsps = a->nsps; a->cnpps = a->npps; memcpy(a->csps, a->sps, a->nsps); memcpy(a->cpps, a->pps, a->npps);
+    a->cfg_rgba = a->rgba; a->cfg_ok = 1;
     a->fw = a->fh = 0; a->dirty = 0; return 1;
 }
 static void read_format(mavc *a) {
