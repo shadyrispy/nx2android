@@ -1,0 +1,8 @@
+# Minecraft Dungeons II on Android (keys in docs/ARCHITECTURE.md "Game profiles on Android")
+# Unreal Engine 5.6 on SDK 20.5.15, base 1.1.1 only; 15,842 shaders from the iOS extraction. Ported 2026-11-15 from the iOS build's output (the dump has gone bad):
+# xReplay on Vulkan, allocator and engine region cut in patches.py, vi::ListFrameHistory added. Plays at 60 fps; water and tunnels are black (open), a cutscene
+# starts with a ~3.5 s frame (open). See README.md "Android".
+status	wip
+tested	v65536 Redmi 2410DPN6CC (Snapdragon 8 Elite, Adreno 830, Android 16)
+orientation	landscape
+requires	bcn
