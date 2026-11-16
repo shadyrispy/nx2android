@@ -8,6 +8,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         None = 0,
         Bindless = 1 << 0,
         Gather = 1 << 1,
+        AtomicMetal = 1 << 23,
         Derivatives = 1 << 2,
         IntCoords = 1 << 3,
         LodBias = 1 << 4,

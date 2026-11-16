@@ -398,6 +398,24 @@ namespace Ryujinx.Graphics.Shader.Translation
             return new SetBindingPair(setIndex, binding);
         }
 
+        public List<SamplerType> GetTextureTypes(int cbufSlot, int textureOffset, bool isImage)
+        {
+            List<SamplerType> types = new();
+
+            foreach ((TextureInfo info, TextureMeta meta) in isImage ? _usedImages : _usedTextures)
+            {
+                (int offset, _, _) = TextureHandle.UnpackOffsets(info.Handle);
+                (int slot, _) = TextureHandle.UnpackSlots(info.CbufSlot, cbufSlot);
+
+                if (info.ArrayLength == 1 && meta.AccurateType && slot == cbufSlot && offset == textureOffset)
+                {
+                    types.Add(meta.Type);
+                }
+            }
+
+            return types;
+        }
+
         private static TextureMeta MergeTextureMeta(TextureMeta meta, TextureMeta existingMeta)
         {
             meta.Set = existingMeta.Set;

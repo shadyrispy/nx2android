@@ -34,7 +34,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     BindlessToArray.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
                 }
 
-                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
+                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor, deferSeveral: true);
 
                 // FragmentCoord only exists on fragment shaders, so we don't need to check other stages.
                 if (context.Stage == ShaderStage.Fragment)
@@ -47,6 +47,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 {
                     DoubleToFloat.RunPass(context.Hfm, context.Blocks[blkIndex]);
                 }
+            }
+
+            // nxnative: the reads whose handle merges several c[2] handles, once every other read has registered its texture (BindlessElimination.TryTableHandle)
+            for (int blkIndex = 0; blkIndex < context.Blocks.Length; blkIndex++)
+            {
+                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
             }
 
             // Run optimizations one last time to remove any code that is now optimizable after above passes.
@@ -320,15 +326,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand lhs = operation.GetSource(0);
             Operand rhs = operation.GetSource(1);
 
-            // nxnative: explicit FMUL can put the reciprocal first. Missing that order left the
-            // perspective round trip in Odyssey's alpha depth pass but not its material pass;
-            // their alpha coverage disagreed and retained HDR colour overflowed across frames.
-            if (lhs.AsgOp is Operation lhsOp && lhsOp.Inst == (Instruction.FP32 | Instruction.Divide) &&
-                rhs.AsgOp is Operation rhsOp && rhsOp.Inst == (Instruction.FP32 | Instruction.Multiply))
-            {
-                (lhs, rhs) = (rhs, lhs);
-            }
-
             // Check LHS of the main multiplication operation. We expect an input being multiplied by gl_FragCoord.w.
             if (lhs.AsgOp is not Operation attrMulOp || attrMulOp.Inst != (Instruction.FP32 | Instruction.Multiply))
             {
@@ -393,7 +390,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
                     {
                         Debug.Assert(src.AsgOp != null);
-                        nodes.Enqueue(src.AsgOp);
+
+                        // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
+                        // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
+                        // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
+                        // The same holds for a producer with another destination still in use: an image read whose .x is dead but whose .y is not stays, and following it
+                        // lost its coordinate (Ocarina of Time's wind solver read a garbage y, and its velocity field oscillated, which made the grass flicker at 10 Hz).
+                        if (!HasSideEffects(src.AsgOp) && DestHasNoUses(src.AsgOp))
+                        {
+                            nodes.Enqueue(src.AsgOp);
+                        }
                     }
                 }
             }
