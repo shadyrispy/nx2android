@@ -72,6 +72,7 @@ JNIEXPORT void JNICALL Java_org_nx2a_ExternalActivity_externalSurface(JNIEnv *en
 }
 
 void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freeze_for(int reason, int on); void dm_gfx_suspend(int on);
+int dm_focus_now(void);   // hle_oe.c: the focus state the game sees (1 InFocus, 2 OutOfFocus, 3 suspended)
 // ---- settings (the pause menu's), kept in the files folder as KEY=VALUE lines ----
 static char g_root[512];
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
@@ -134,6 +135,15 @@ static void hold_sync(void) {
     int want = atomic_load(&g_bg) || atomic_load(&g_menu) || atomic_load(&g_tx_on) || atomic_load(&g_ime_on);
     if (want != g_held) { g_held = want; if (want) { dm_movie_hold(1); dm_audio_suspend(1); guest_clock_freeze_for(1, 1); } else { guest_clock_freeze_for(1, 0); dm_audio_suspend(0); dm_movie_hold(0); } }
     pthread_mutex_unlock(&g_hold_mu);
+}
+
+// A floating window (a chat bubble, the screenshot toolbar) takes the window's input focus, and the game pauses itself on the OutOfFocus
+// notification, waiting for InFocus before it reads the pads again (KTGL does; a real Switch suspends the game out of focus, so it never
+// sees this state as long as it does here). A pad press or a touch proves the player is playing, so the game goes back InFocus:
+// the floating window keeps the window focus, but the game no longer waits
+static void focus_back(void) {
+    if (atomic_load(&g_bg) || atomic_load(&g_menu) || atomic_load(&g_tx_on) || atomic_load(&g_ime_on)) return;
+    if (dm_focus_now() == 2) { dm_focus_set(1); LOG("[input] the window focus was elsewhere (a floating window): the game is back InFocus on player input"); }
 }
 static void shake_sensor(int on);   // the accelerometer, off in the background (input, below)
 static void go_background(void) { if (!atomic_load(&g_running) || atomic_exchange(&g_bg, 1)) return; dm_focus_set(2); dm_focus_set(3);   // through OutOfFocus, as a game sees HOME and then the suspension (front_mac.m does the same)
@@ -985,7 +995,7 @@ static int handle_event(AInputEvent *e) {
                 seen[k >> 3] |= (uint8_t)(1 << (k & 7)); LOG("[input] controller key %d (device %d): not mapped", k, AInputEvent_getDeviceId(e)); }
             return 0;
         }
-        if (down) pad_mark_used(AInputEvent_getDeviceId(e));   // a release after a touch must not hide the controls again
+        if (down) { pad_mark_used(AInputEvent_getDeviceId(e)); focus_back(); }   // a release after a touch must not hide the controls again
         if (atomic_load(&g_menu)) { if (down && AKeyEvent_getRepeatCount(e) == 0) menu_key(bit); return 1; }
         if (down) g_btn |= bit; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) g_btn &= ~bit;
         dm_pad_players(1); pad_publish(); return 1;
@@ -1013,8 +1023,10 @@ static int handle_event(AInputEvent *e) {
         if (axes[4] == 0) axes[4] = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0);
         if (axes[5] == 0) axes[5] = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0);
         // Idle reports still release game inputs, but only a mapped axis outside its dead zone takes over from touch.
-        if (axis(axes[0]) || axis(axes[1]) || axis(axes[2]) || axis(axes[3]) || pad_axis_buttons(axes))
+        if (axis(axes[0]) || axis(axes[1]) || axis(axes[2]) || axis(axes[3]) || pad_axis_buttons(axes)) {
             pad_mark_used(AInputEvent_getDeviceId(e));
+            focus_back();
+        }
         if (atomic_load(&g_menu)) {   // the hat moves the selection
             static float hx, hy; float x = axes[6], y = axes[7];
             if (y < -0.5f && hy >= -0.5f) menu_key(DM_BTN_UP); else if (y > 0.5f && hy <= 0.5f) menu_key(DM_BTN_DOWN);
@@ -1024,7 +1036,7 @@ static int handle_event(AInputEvent *e) {
         memcpy(g_ax, axes, sizeof g_ax);
         dm_pad_players(1); pad_publish(); return 1;
     }
-    if ((src & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN) { touch_event(e); return 1; }
+    if ((src & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN) { focus_back(); touch_event(e); return 1; }
     return 0;
 }
 static int on_input(int fd, int events, void *data) {
@@ -1177,6 +1189,7 @@ static void *host_thread(void *a) {
     atomic_store(&g_running, 1);
     int rc = main(2, argv);
     LOG("host returned %d", rc);
+    { void hlecount_flush(void); hlecount_flush(); }   // DM_HLECOUNT: nnMain's normal return also leaves by _exit, which does not run atexit
     dm_perf_gpu_release();   // the game ended itself: the device-wide KGSL property outlives the process (perf_android.c)
     _exit(rc);
 }

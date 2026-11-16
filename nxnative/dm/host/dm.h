@@ -1,6 +1,8 @@
 // Common header of the native Switch host (multi-module).
 #pragma once
 #include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +10,9 @@
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 #define MAX_MOD 128   // the profile's modules (up to 8) and the NROs a game loads at run time (Super Smash Bros. Ultimate: 98)
-#define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+// Seconds since process start, the same origin the fs read log uses (hle_fs.c's g_t0_ns), so log.txt and fslog.tsv line up
+double dm_log_elapsed(void);   // defined in dm/host/main.c
+#define LOG(...) do { fprintf(stderr, "[dm] %9.3fs ", dm_log_elapsed()); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 // Object-format differences for inline assembly and registration tables (Android port: ELF instead of Mach-O).

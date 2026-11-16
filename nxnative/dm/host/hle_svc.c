@@ -21,10 +21,11 @@ static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 static uint8_t *g_alias; static size_t g_alias_cap;
+static size_t g_reserve;           // the whole block: RESERVE less the profile's alias region plus the one in use (64 GB like the Switch, mem_init)
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
-int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
+int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
 static void *alias_windows_thread(void *arg);
 static void mem_init(void) {
@@ -36,12 +37,19 @@ static void mem_init(void) {
     // Android port: the alias region (g_as + 256 MB) starts on a 1 GB boundary. The SDK aligns large address regions (a VA-memory StandardAllocator's,
     // after its ~1 GB node area), so where they fit in the alias region depended on the address ASLR gave the block: NEO's nninitStartup aborted in
     // StandardAllocator::Initialize on some runs and not on others. 64-bit Android has the address space to over-reserve by 1 GB and trim
+    // The alias region is the Switch's 64 GB like on the Mac (games lay their regions out for that much: RTK14, SDK 16, takes a ~1 GB node area and then
+    // gave up at boot when the region held 256 MB — init returned -51, audio torn down, clean exit; the Mac ran the same module with the 64 GB region).
+    // 3.448 GB (T bluetooth HD): the iPhone's whole block; DM_ALIAS_SIZE sets another size.
+    size_t alias = DM_GAME_MEM_ALIAS > UINT64_C(0x1000000000) ? DM_GAME_MEM_ALIAS : (size_t)UINT64_C(0x1000000000);
+    const char *asz = getenv("DM_ALIAS_SIZE");
+    if (asz && *asz) alias = (size_t)strtoull(asz, NULL, 0);
+    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
     {   const size_t A = 1ull << 30;
-        uint8_t *r = mmap(NULL, RESERVE + A, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        uint8_t *r = mmap(NULL, g_reserve + A, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
         if (r == MAP_FAILED) die("reserve guest AS");
         uint8_t *al = (uint8_t *)((((uintptr_t)r + 0x10000000 + A - 1) & ~(uintptr_t)(A - 1)) - 0x10000000);
         if (al > r) munmap(r, (size_t)(al - r));
-        if (al + RESERVE < r + RESERVE + A) munmap(al + RESERVE, (size_t)(r + RESERVE + A - (al + RESERVE)));
+        if (al + g_reserve < r + g_reserve + A) munmap(al + g_reserve, (size_t)(r + g_reserve + A - (al + g_reserve)));
         g_as = al;
     }
 #endif
@@ -51,11 +59,11 @@ static void mem_init(void) {
     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
     // The alias and stack sizes come from the game profile (mem_alias / mem_stack), the heap takes the rest; Mario: alias 0xB8000000, stack 0x10000000 → stack at +0xC8000000, heap at +0xD8000000
-    g_alias = g_as + 0x10000000; g_alias_cap = DM_GAME_MEM_ALIAS;
+    g_alias = g_as + 0x10000000; g_alias_cap = alias;
     g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
-    g_heap  = g_stack + g_stack_cap; g_heap_cap  = RESERVE - (size_t)(g_heap - g_as);
+    g_heap  = g_stack + g_stack_cap; g_heap_cap  = g_reserve - (size_t)(g_heap - g_as);
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
-    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
+    LOG("guest AS %p +%#llx (alias %#llx) heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, (unsigned long long)alias, g_heap, g_alias, g_stack);
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
 }
@@ -73,7 +81,7 @@ static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++)
 static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].file_image_len; return n; }
 
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
-void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = RESERVE; }
+void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_reserve; }
 
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
@@ -204,8 +212,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         pthread_mutex_lock(&g_map_lock);   // the registry branches read g_map; the other branches are cheap, so the lock simply spans the whole chain
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
-        else if (a >= g_as && a < g_as + RESERVE) {   // free: up to the adjacent mapping/heap boundary
-            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + RESERVE;
+        else if (a >= g_as && a < g_as + g_reserve) {   // free: up to the adjacent mapping/heap boundary
+            uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
             if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
             else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
             for (int i = 0; i < g_nmap; i++) {
@@ -310,7 +318,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
-        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
+        case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
         case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)

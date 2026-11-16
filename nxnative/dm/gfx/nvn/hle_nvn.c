@@ -872,7 +872,8 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
     CB(c)->host_control = 0; CB(c)->ctl_anchor = 0;
-    CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
+    CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there); a cumulative count made KTGL's
+                       // 16 MiB ring wrap early and overwrite unsubmitted records with uniform floats (RTK14 2026-11-15: "record stream out of step" entering settings)
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) {
     cmd_t *o = CB(c); if (!m || n < 16) return;

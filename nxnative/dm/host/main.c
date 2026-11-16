@@ -56,6 +56,8 @@ static uint64_t proc_start_mono_ns(void) {
 
 // Host loading (independent of UIKit / Metal): read the NSO, relocate, forced take-over, probes / tick gate / keys, start prefetch. By default it runs synchronously in main;
 // the iOS front end can call dm_host_preload_start(same arguments) at the very start of the App's main() so that it runs first on a background thread, in parallel with the UIKit startup chain (⓪ + ① ≈ max(UIKit chain, host loading)).
+// Seconds since process start: the log's timestamp, the same origin as the fs read log's (hle_fs.c g_t0_ns)
+double dm_log_elapsed(void) { return (now_ns() - proc_start_mono_ns()) / 1e9; }
 static pthread_key_t g_race_keys[512];
 static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
